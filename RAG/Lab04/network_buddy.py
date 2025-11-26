@@ -14,7 +14,7 @@ from langchain.schema import SystemMessage, HumanMessage
 # =========================================================
 # Foundry setup (LOCAL LLM)
 # =========================================================
-alias = "qwen2.5-0.5b"   # or any other local alias
+alias = "deepseek-r1-1.5b"   # or any other local alias
 
 try:
     manager = FoundryLocalManager(alias)
@@ -25,15 +25,16 @@ except Exception as e:
     st.error(f"❌ Could not initialize Foundry Local: {e}")
     st.stop()
 
-# Single LLM used for both planning + RAG
 llm = ChatOpenAI(
-    model=model_id,
-    base_url=manager.endpoint,   # Foundry Local REST endpoint (OpenAI-compatible)
-    api_key=manager.api_key,     # Fake key required by client, provided by manager
+    model=alias,
+    base_url=manager.endpoint,
+    api_key=manager.api_key,
     temperature=0,
     streaming=False,
+    timeout=30,
 )
-
+test = llm.invoke([HumanMessage(content="Say hi as JSON: {\"ok\": true}")])
+print("LLM test:", test.content)
 # -------------------------------------------------
 # JSON Extraction Helper (handles code fences, etc.)
 # -------------------------------------------------
