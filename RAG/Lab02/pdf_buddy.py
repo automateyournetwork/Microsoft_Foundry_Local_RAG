@@ -10,6 +10,19 @@ from langchain_openai import ChatOpenAI
 import tempfile
 import os
 
+#foundry setup
+# Choose an alias from the Foundry Local catalog
+# e.g. "qwen2.5-0.5b", "phi-4-mini-instruct", etc.
+alias = "qwen2.5-0.5b"   # or a phi-* alias when you pick one
+
+# Start Foundry Local and load the model
+manager = FoundryLocalManager(alias)
+
+# Get the concrete model id (the optimized ONNX variant)
+model_id = manager.get_model_info(alias).id
+print(f"🤖 Using Foundry Local model: {model_id}"
+      )
+
 st.set_page_config(page_title="📄 Chat with Your PDF", page_icon="📎")
 st.title("📄 Chat with Your PDF")
 st.markdown("Upload a PDF and ask it questions using RAG!")
