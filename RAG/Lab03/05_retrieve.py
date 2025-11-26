@@ -1,0 +1,106 @@
+from genie.testbed import load
+from langchain_community.document_loaders import JSONLoader
+from langchain_experimental.text_splitter import SemanticChunker
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.vectorstores import Chroma
+from langchain.chains import ConversationalRetrievalChain
+from foundry_local import FoundryLocalManager
+from langchain_openai import ChatOpenAI
+import tempfile
+import json
+import os
+import uuid
+
+#foundry setup
+# Choose an alias from the Foundry Local catalog
+# e.g. "qwen2.5-0.5b", "phi-4-mini-instruct", etc.
+alias = "qwen2.5-0.5b"   # or a phi-* alias when you pick one
+
+# Start Foundry Local and load the model
+manager = FoundryLocalManager(alias)
+
+# Get the concrete model id (the optimized ONNX variant)
+model_id = manager.get_model_info(alias).id
+print(f"🤖 Using Foundry Local model: {model_id}"
+      )
+
+# --- Step 1: Connect to device and get parsed JSON ---
+testbed = load("testbed.yaml")
+device = testbed.devices["CAT9k_AO"]
+device.connect(log_stdout=True)
+parsed_output = device.parse("show ip interface brief")
+
+# --- Step 2: Write parsed JSON to temp file ---
+with tempfile.NamedTemporaryFile(delete=False, suffix=".json", mode="w") as tmp:
+    json.dump(parsed_output, tmp, indent=2)
+    tmp_path = tmp.name
+
+# --- Step 3: Load JSON into LangChain Documents ---
+# --- Step 3: Load JSON into LangChain Documents ---
+loader = JSONLoader(
+    file_path=tmp_path,
+    jq_schema='.',              # Entire JSON object (one doc per interface)
+    text_content=False
+)
+
+documents = loader.load()
+os.remove(tmp_path)
+
+# --- Step 4: Embed & Split ---
+embedding = HuggingFaceEmbeddings(
+    model_name="sentence-transformers/all-MiniLM-L6-v2"
+)
+semantic_splitter = SemanticChunker(embedding)
+semantic_chunks = semantic_splitter.split_documents(documents)
+
+# --- Step 5: Store in Chroma ---
+session_id = str(uuid.uuid4())
+persist_path = f"chroma_routes_{session_id}"
+
+vector_store = Chroma.from_documents(
+    semantic_chunks,
+    embedding,
+    persist_directory=persist_path
+)
+vector_store.persist()
+print("📦 Chroma vector store ready and persisted.")
+
+# --- Method 1: Direct semantic search ---
+print("\n🔎 Method 1: Direct similarity search")
+questions = [
+    "Can I get a summary of my interfaces?",
+    "Which interfaces have IP addresses?",
+    "Do I have any SVIs or Loopback interfaces?",
+    "What interfaces are up/up?",
+]
+
+for q in questions:
+    print(f"\n❓ Q: {q}")
+    results = vector_store.similarity_search(q, k=2)
+    for i, doc in enumerate(results):
+        print(f"\n📄 Match {i+1}:\n{doc.page_content[:300]}...\n")
+
+# --- Method 2: Conversational Retrieval QA ---
+print("\n🤖 Method 2: Conversational RAG over routing data")
+
+# Now configure ChatOpenAI to talk to the *local* OpenAI-compatible endpoint
+llm = ChatOpenAI(
+    model=model_id,
+    base_url=manager.endpoint,   # Foundry Local REST endpoint
+    api_key=manager.api_key,     # Fake key used locally, but required by SDK
+    temperature=0,
+    streaming=False,
+)
+
+qa_chain = ConversationalRetrievalChain.from_llm(
+    llm=llm,
+    retriever=vector_store.as_retriever(search_kwargs={"k": 5}),
+    return_source_documents=True
+)
+
+chat_history = []
+q2 = "Help me understand my interfaces for CAT9k_AO?"
+response = qa_chain.invoke({"question": q2, "chat_history": chat_history})
+
+print(f"\n🧠 Answer: {response['answer']}\n")
+print(f"📚 Source snippet:\n{response['source_documents'][0].page_content[:300]}...\n")

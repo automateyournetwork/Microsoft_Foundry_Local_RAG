@@ -1,0 +1,1 @@
+streamlit run network_buddy.py

@@ -1,0 +1,1 @@
+streamlit run pdf_buddy.py
