@@ -10,25 +10,27 @@ import json, os, tempfile, re
 from foundry_local import FoundryLocalManager
 from langchain_openai import ChatOpenAI
 from langchain.schema import SystemMessage, HumanMessage
+from openai import BadRequestError
 
 # =========================================================
 # Foundry setup (LOCAL LLM)
 # =========================================================
-alias = "phi-4-mini"   # or any other local alias
+alias = "phi-4-mini"   # catalog alias from Foundry Local
 
 try:
     manager = FoundryLocalManager(alias)
-    model_id = manager.get_model_info(alias).id
+    model_info = manager.get_model_info(alias)
+    model_id = model_info.id   # concrete ONNX model id used by OpenAI endpoint
     print(f"🤖 Using Foundry Local model: {model_id}")
 except Exception as e:
-    # If Foundry service isn't running / reachable, bail out early
     st.error(f"❌ Could not initialize Foundry Local: {e}")
     st.stop()
 
+# Single LLM used for both planning + RAG
 llm = ChatOpenAI(
-    model=alias,
-    base_url=manager.endpoint,
-    api_key=manager.api_key,
+    model=model_id,              # IMPORTANT: use model_id, not alias
+    base_url=manager.endpoint,   # e.g. http://127.0.0.1:53158/openai
+    api_key=manager.api_key,     # fake key, but required by client
     temperature=0,
     streaming=False,
     timeout=30,
@@ -76,6 +78,12 @@ def smart_run(device, command):
 st.set_page_config(page_title="🤖 Network Buddy", page_icon="🛠️")
 st.title("🤖 Network Buddy")
 st.markdown("Ask anything about your live network — routes, interfaces, configs, protocols!")
+
+# Optional: show which local model/endpoint we’re using
+with st.expander("🔧 Debug: Foundry Local Info"):
+    st.write(f"Model alias: `{alias}`")
+    st.write(f"Model id: `{model_id}`")
+    st.write(f"Endpoint: `{manager.endpoint}`")
 
 # -------------------------------------------------
 # Load Testbed + Device Names
@@ -126,13 +134,20 @@ if user_question:
 
     # ---- PLANNER (local Foundry) -----------------------------------------
     with st.spinner("🤔 Planning next action..."):
-        response_msg = llm.invoke(
-            [
-                SystemMessage(content=PLANNER_SYSTEM_PROMPT),
-                HumanMessage(content=user_question),
-            ]
-        )
-        raw_plan = response_msg.content
+        try:
+            response_msg = llm.invoke(
+                [
+                    SystemMessage(content=PLANNER_SYSTEM_PROMPT),
+                    HumanMessage(content=user_question),
+                ]
+            )
+            raw_plan = response_msg.content
+        except BadRequestError as e:
+            st.error(f"❌ Planner LLM BadRequest: {e}")
+            st.stop()
+        except Exception as e:
+            st.error(f"❌ Planner LLM failed: {e}")
+            st.stop()
 
     # ---- SAFE JSON EXTRACTION --------------------------------------------
     try:
@@ -190,7 +205,14 @@ if user_question:
     )
 
     with st.spinner("💡 Generating answer..."):
-        response = qa.invoke({"question": user_question, "chat_history": []})
+        try:
+            response = qa.invoke({"question": user_question, "chat_history": []})
+        except BadRequestError as e:
+            st.error(f"❌ RAG LLM BadRequest: {e}")
+            st.stop()
+        except Exception as e:
+            st.error(f"❌ RAG LLM failed: {e}")
+            st.stop()
 
     # ---- DISPLAY RESULTS --------------------------------------------------
     st.markdown(f"### 🤖 Network Buddy Answer\n{response['answer']}")
