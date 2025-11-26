@@ -5,47 +5,44 @@ from langchain_experimental.text_splitter import SemanticChunker
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain.chains import ConversationalRetrievalChain
-from openai import OpenAI
 import json, os, tempfile, re
+
 from foundry_local import FoundryLocalManager
 from langchain_openai import ChatOpenAI
+from langchain.schema import SystemMessage, HumanMessage
 
-#foundry setup
-# Choose an alias from the Foundry Local catalog
-# e.g. "qwen2.5-0.5b", "phi-4-mini-instruct", etc.
-alias = "qwen2.5-0.5b"   # or a phi-* alias when you pick one
+# =========================================================
+# Foundry setup (LOCAL LLM)
+# =========================================================
+alias = "qwen2.5-0.5b"   # or any other local alias
 
-# Start Foundry Local and load the model
-manager = FoundryLocalManager(alias)
+try:
+    manager = FoundryLocalManager(alias)
+    model_id = manager.get_model_info(alias).id
+    print(f"🤖 Using Foundry Local model: {model_id}")
+except Exception as e:
+    # If Foundry service isn't running / reachable, bail out early
+    st.error(f"❌ Could not initialize Foundry Local: {e}")
+    st.stop()
 
-# Get the concrete model id (the optimized ONNX variant)
-model_id = manager.get_model_info(alias).id
-print(f"🤖 Using Foundry Local model: {model_id}"
-      )
+# Single LLM used for both planning + RAG
+llm = ChatOpenAI(
+    model=model_id,
+    base_url=manager.endpoint,   # Foundry Local REST endpoint (OpenAI-compatible)
+    api_key=manager.api_key,     # Fake key required by client, provided by manager
+    temperature=0,
+    streaming=False,
+)
 
 # -------------------------------------------------
 # JSON Extraction Helper (handles code fences, etc.)
 # -------------------------------------------------
 def extract_json(text: str):
-    """
-    Extracts the first valid JSON object from a string.
-    Handles:
-    - code fences ```json ... ```
-    - extra whitespace
-    - text before/after the JSON
-    - stray newlines
-    """
-    # Remove ```json or ``` wrappers
-    text = text.replace("```json", "")
-    text = text.replace("```", "")
-
-    # Extract first {...} block
+    text = text.replace("```json", "").replace("```", "")
     match = re.search(r"\{[\s\S]*\}", text)
     if not match:
         raise ValueError(f"No JSON object found in: {text}")
-
     json_str = match.group(0)
-
     try:
         return json.loads(json_str)
     except Exception as e:
@@ -61,19 +58,15 @@ def smart_run(device, command):
     """
     from genie.metaparser.util.exceptions import SchemaEmptyParserError, SchemaMissingKeyError
 
-    # ---- FORCE RAW MODE FOR RUNNING CONFIG ----
     if "show run" in command or "show running" in command:
         raw_output = device.execute(command)
         return raw_output, True
 
-    # ---- TRY PARSED MODE FOR OTHER COMMANDS ----
     try:
         parsed = device.parse(command)
         return parsed, False
-
     except (SchemaEmptyParserError, SchemaMissingKeyError):
         return device.execute(command), True
-
     except Exception:
         return device.execute(command), True
 
@@ -119,33 +112,35 @@ RULES:
 - No explanations, no backticks, no code fences.
 """
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
 # -------------------------------------------------
 # UI Input
 # -------------------------------------------------
-user_question = st.text_input("💬 What do you want to know? (e.g., 'What is the default route on CAT9k_AO?')")
+user_question = st.text_input(
+    "💬 What do you want to know? (e.g., 'What is the default route on CAT9k_AO?')"
+)
 
 # -------------------------------------------------
 # Main Logic
 # -------------------------------------------------
 if user_question:
 
-    # ---- PLANNER ----------------------------------------------------------
+    # ---- PLANNER (local Foundry) -----------------------------------------
     with st.spinner("🤔 Planning next action..."):
-        raw_plan = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": PLANNER_SYSTEM_PROMPT},
-                {"role": "user", "content": user_question}
+        response_msg = llm.invoke(
+            [
+                SystemMessage(content=PLANNER_SYSTEM_PROMPT),
+                HumanMessage(content=user_question),
             ]
-        ).choices[0].message.content
+        )
+        raw_plan = response_msg.content
 
     # ---- SAFE JSON EXTRACTION --------------------------------------------
     try:
         plan = extract_json(raw_plan)
     except Exception as e:
-        st.error(f"❌ LLM did not return valid JSON.\n\nReturned:\n{raw_plan}\n\nError: {e}")
+        st.error(
+            f"❌ LLM did not return valid JSON.\n\nReturned:\n{raw_plan}\n\nError: {e}"
+        )
         st.stop()
 
     # ---- VALIDATE DEVICE --------------------------------------------------
@@ -167,7 +162,6 @@ if user_question:
 
     # ---- SAVE TEMP FILE (RAW OR JSON) -----------------------------------
     suffix = ".txt" if is_raw else ".json"
-
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix, mode="w") as tmp:
         if is_raw:
             tmp.write(output)
@@ -186,23 +180,13 @@ if user_question:
     )
     splitter = SemanticChunker(embedding)
     chunks = splitter.split_documents(documents)
-
     vectorstore = Chroma.from_documents(chunks, embedding)
 
-    # ---- RAG QA -----------------------------------------------------------
-    # Now configure ChatOpenAI to talk to the *local* OpenAI-compatible endpoint
-    llm = ChatOpenAI(
-        model=model_id,
-        base_url=manager.endpoint,   # Foundry Local REST endpoint
-        api_key=manager.api_key,     # Fake key used locally, but required by SDK
-        temperature=0,
-        streaming=False,
-    )
-
+    # ---- RAG QA (local Foundry again) ------------------------------------
     qa = ConversationalRetrievalChain.from_llm(
-        llm=llm,
+        llm=llm,  # same local model as planner
         retriever=vectorstore.as_retriever(search_kwargs={"k": 4}),
-        return_source_documents=True
+        return_source_documents=True,
     )
 
     with st.spinner("💡 Generating answer..."):
