@@ -14,7 +14,7 @@ from langchain.schema import SystemMessage, HumanMessage
 # =========================================================
 # Foundry setup (LOCAL LLM)
 # =========================================================
-alias = "deepseek-r1-1.5b"   # or any other local alias
+alias = "phi-4-mini"   # or any other local alias
 
 try:
     manager = FoundryLocalManager(alias)
@@ -33,8 +33,7 @@ llm = ChatOpenAI(
     streaming=False,
     timeout=30,
 )
-test = llm.invoke([HumanMessage(content="Say hi as JSON: {\"ok\": true}")])
-print("LLM test:", test.content)
+
 # -------------------------------------------------
 # JSON Extraction Helper (handles code fences, etc.)
 # -------------------------------------------------
